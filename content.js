@@ -244,15 +244,21 @@
     return postUrl || null;
   };
 
-  // Returns true if a short string looks like a relative or absolute timestamp
-  // ("10h", "2d", "March 5", "Yesterday", "Just now", etc.).
+  // Returns true if a short string looks like a relative or absolute timestamp.
+  // Covers Facebook's formats: "10h", "2 hours ago", "March 5", "Yesterday", etc.
   const looksLikeTimestamp = (text) => {
-    if (!text || text.length > 30) return false;
+    if (!text || text.length > 50) return false;
     return (
-      /^\d+\s*(m|h|d|w|min|hr|hrs|days?)$/i.test(text) ||
+      // Short forms: "10h", "2d", "5m", "3w"
+      /^\d+\s*[mhdw]$/i.test(text) ||
+      // Long relative: "2 hours ago", "10 minutes ago", "about an hour ago"
+      /^(about\s+)?(a|an|\d+)\s+(minute|hour|day|week)s?(\s+ago)?$/i.test(text) ||
+      // "Just now", "Yesterday", "Today"
       /^(just now|yesterday|today)/i.test(text) ||
-      /^[A-Z][a-z]+ \d{1,2}(, \d{4})?$/.test(text) || // "March 5" or "March 5, 2025"
-      /^\d{1,2}\/\d{1,2}(\/\d{2,4})?$/.test(text)    // "3/5" or "3/5/25"
+      // "March 5" or "March 5, 2025"
+      /^[A-Z][a-z]+ \d{1,2}(, \d{4})?$/.test(text) ||
+      // "3/5" or "3/5/25"
+      /^\d{1,2}\/\d{1,2}(\/\d{2,4})?$/.test(text)
     );
   };
 
@@ -351,40 +357,33 @@
     if (commentEls.length > 0) {
       return commentEls
         .map((el) => {
-          // --- author ---
-          const profileEl = el.querySelector(
-            '[data-ad-rendering-role="profile_name"]'
-          );
-          let author = normalizeText(
-            profileEl ? profileEl.innerText || profileEl.textContent || "" : ""
-          ).split(" · ")[0].trim();
-
-          // Parse aria-label as backup: "Comment by TravelTico6915 · 10h"
+          // --- commenter (name + relative time, e.g. "WhiteJaguar5218 11 hours ago") ---
+          // Facebook puts both the name and the timestamp in the comment's aria-label
+          // ("Comment by WhiteJaguar5218 11 hours ago") so we use that as the primary
+          // source. It already contains everything a downstream tool needs to split if
+          // desired, without requiring us to reassemble two separate fields.
           const ariaLabel = el.getAttribute("aria-label") || "";
-          if (!author) {
-            const m = ariaLabel.match(/^[^·]+by\s+(.+?)(?:\s+·|\s*$)/i);
-            if (m) author = m[1].trim();
+          let commenter = null;
+
+          const ariaMatch = ariaLabel.match(/^[^·]+by\s+(.+?)(?:\s+·\s*|\s*$)/i);
+          if (ariaMatch) {
+            commenter = ariaMatch[1].trim();
           }
 
-          // --- time ---
-          // Try parsing from aria-label first ("... · 10h"), then scan child elements.
-          let time = null;
-          const ariaTimePart = ariaLabel.split(" · ").slice(1).find(looksLikeTimestamp);
-          if (ariaTimePart) {
-            time = ariaTimePart.trim();
-          } else {
-            const timeEl = Array.from(el.querySelectorAll("a, span, abbr")).find(
-              (node) => looksLikeTimestamp((node.textContent || "").trim())
+          if (!commenter) {
+            // Fallback: use profile_name element text
+            const profileEl = el.querySelector(
+              '[data-ad-rendering-role="profile_name"]'
             );
-            if (timeEl) {
-              time =
-                timeEl.getAttribute("aria-label") ||
-                timeEl.getAttribute("title") ||
-                (timeEl.textContent || "").trim();
+            if (profileEl) {
+              commenter = normalizeText(
+                profileEl.innerText || profileEl.textContent || ""
+              ).split(" · ")[0].trim() || null;
             }
           }
 
           // --- text ---
+          // Collect leaf dir="auto" nodes outside the profile_name subtree.
           const textNodes = Array.from(
             el.querySelectorAll('div[dir="auto"], span[dir="auto"]')
           ).filter(
@@ -393,21 +392,32 @@
               !node.closest('[data-ad-rendering-role="profile_name"]')
           );
 
-          const text = normalizeText(
+          let text = normalizeText(
             textNodes.map((n) => n.innerText || n.textContent || "").join(" ")
           );
+
+          // Facebook sometimes injects the commenter's display name as a text node
+          // before the comment body. Strip it if the text starts with the name part.
+          if (commenter && text) {
+            // Extract just the name (everything before the first digit-time token)
+            const namePart = commenter.replace(
+              /\s+\d+\s*(minute|hour|day|week)s?(\s+ago)?$/i, ""
+            ).trim();
+            if (namePart && text.startsWith(namePart)) {
+              text = text.slice(namePart.length).trim();
+            }
+          }
 
           if (!text || isUiChrome(text)) {
             return null;
           }
 
-          return { author: author || null, time: time || null, text };
+          return { commenter: commenter || null, text };
         })
         .filter(Boolean);
     }
 
-    // Fallback: generic leaf dir="auto" nodes outside the post body, returned
-    // as plain { text } objects (no author/time available in this path).
+    // Fallback: generic leaf dir="auto" nodes outside the post body.
     return uniqueNonEmptyTexts(
       Array.from(
         article.querySelectorAll('div[dir="auto"], span[dir="auto"]')
@@ -422,7 +432,7 @@
         .map((node) => node.innerText || node.textContent || "")
     )
       .filter((text) => !isUiChrome(text))
-      .map((text) => ({ author: null, time: null, text }));
+      .map((text) => ({ commenter: null, text }));
   };
 
   // Return true for single-word platform strings that are never real post text.
@@ -540,15 +550,17 @@
         .filter((el) => !isInsideComment(el))
         .map((el) => (el.textContent || "").trim())
         .filter((text) => {
-          if (!text || text.length > 40) return false;
+          // Must be short and start with a digit or "All" to avoid picking up
+          // concatenated strings like "View insights925 post reach".
+          if (!text || text.length > 25) return false;
+          if (!/^(\d|All\s)/i.test(text)) return false;
           return (
-            /\d/.test(text) &&
-            (/post reach/i.test(text) ||
-              /comments?/i.test(text) ||
-              /reactions?/i.test(text) ||
-              /shares?/i.test(text) ||
-              /comentarios?/i.test(text) ||
-              /me gusta/i.test(text))
+            /post reach/i.test(text) ||
+            /comments?/i.test(text) ||
+            /reactions?/i.test(text) ||
+            /shares?/i.test(text) ||
+            /comentarios?/i.test(text) ||
+            /me gusta/i.test(text)
           );
         });
 
