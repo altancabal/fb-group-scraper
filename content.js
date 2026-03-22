@@ -93,14 +93,17 @@
     }, 250);
   };
 
-  const triggerDownload = (posts) => {
-    const json = JSON.stringify(posts, null, 2);
+  const triggerDownload = (posts, meta) => {
+    const output = { meta, posts };
+    const json = JSON.stringify(output, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const blobUrl = URL.createObjectURL(blob);
     const downloadLink = document.createElement("a");
 
+    // Embed a timestamp in the filename so repeated runs don't overwrite each other.
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     downloadLink.href = blobUrl;
-    downloadLink.download = "group_data.json";
+    downloadLink.download = `group_data_${stamp}.json`;
     downloadLink.style.display = "none";
 
     document.body.appendChild(downloadLink);
@@ -241,6 +244,59 @@
     return postUrl || null;
   };
 
+  // Returns true if a short string looks like a relative or absolute timestamp
+  // ("10h", "2d", "March 5", "Yesterday", "Just now", etc.).
+  const looksLikeTimestamp = (text) => {
+    if (!text || text.length > 30) return false;
+    return (
+      /^\d+\s*(m|h|d|w|min|hr|hrs|days?)$/i.test(text) ||
+      /^(just now|yesterday|today)/i.test(text) ||
+      /^[A-Z][a-z]+ \d{1,2}(, \d{4})?$/.test(text) || // "March 5" or "March 5, 2025"
+      /^\d{1,2}\/\d{1,2}(\/\d{2,4})?$/.test(text)    // "3/5" or "3/5/25"
+    );
+  };
+
+  // Extract when the post was published. Facebook places a timestamp link
+  // (showing "10h", "March 5", etc.) near the author in the post header.
+  const extractPostTimestamp = (article) => {
+    try {
+      // Prefer <abbr title="full date"> which Facebook sometimes uses.
+      const abbr = article.querySelector(
+        ':not([role="article"]) abbr[title]'
+      );
+      if (abbr) {
+        return abbr.getAttribute("title") || abbr.textContent?.trim() || null;
+      }
+
+      // Fallback: find a <a> or <span> near the author header that has timestamp text.
+      // Exclude anything inside a nested comment article.
+      const commentArticles = Array.from(
+        article.querySelectorAll('[role="article"]')
+      );
+      const isInComment = (el) => commentArticles.some((c) => c.contains(el));
+
+      const candidates = Array.from(
+        article.querySelectorAll("a, span")
+      ).filter((el) => !isInComment(el));
+
+      for (const el of candidates) {
+        const text = (el.textContent || "").trim();
+        if (looksLikeTimestamp(text)) {
+          // Prefer the title/aria-label if present (it holds the full date).
+          return (
+            el.getAttribute("aria-label") ||
+            el.getAttribute("title") ||
+            text
+          );
+        }
+      }
+    } catch (error) {
+      console.debug("fb-group-scraper: failed to extract post timestamp", error);
+    }
+
+    return null;
+  };
+
   // Extract the post author name from the profile_name rendering role.
   const extractAuthorName = (article) => {
     const profileEl = article.querySelector(
@@ -282,9 +338,9 @@
   };
 
   // Extract visible comments from within a post article.
+  // Returns an array of { author, time, text } objects.
   // Facebook renders each comment as a nested role="article" element. Comments
-  // do NOT have a story_message descendant (that only appears in posts), so we
-  // use that to tell them apart from the post itself.
+  // do NOT have a story_message descendant (that only appears in posts).
   const extractComments = (article) => {
     const commentEls = Array.from(
       article.querySelectorAll('[role="article"]')
@@ -293,24 +349,42 @@
     );
 
     if (commentEls.length > 0) {
-      return uniqueNonEmptyTexts(
-        commentEls.map((el) => {
-          // Commenter name: prefer profile_name role; fall back to parsing aria-label.
+      return commentEls
+        .map((el) => {
+          // --- author ---
           const profileEl = el.querySelector(
             '[data-ad-rendering-role="profile_name"]'
           );
-          let name = normalizeText(
+          let author = normalizeText(
             profileEl ? profileEl.innerText || profileEl.textContent || "" : ""
           ).split(" · ")[0].trim();
 
-          if (!name) {
-            // aria-label is like "Comment by TravelTico6915 · 10h"
-            const ariaLabel = el.getAttribute("aria-label") || "";
+          // Parse aria-label as backup: "Comment by TravelTico6915 · 10h"
+          const ariaLabel = el.getAttribute("aria-label") || "";
+          if (!author) {
             const m = ariaLabel.match(/^[^·]+by\s+(.+?)(?:\s+·|\s*$)/i);
-            if (m) name = m[1].trim();
+            if (m) author = m[1].trim();
           }
 
-          // Comment text: leaf dir="auto" nodes outside the name/metadata area.
+          // --- time ---
+          // Try parsing from aria-label first ("... · 10h"), then scan child elements.
+          let time = null;
+          const ariaTimePart = ariaLabel.split(" · ").slice(1).find(looksLikeTimestamp);
+          if (ariaTimePart) {
+            time = ariaTimePart.trim();
+          } else {
+            const timeEl = Array.from(el.querySelectorAll("a, span, abbr")).find(
+              (node) => looksLikeTimestamp((node.textContent || "").trim())
+            );
+            if (timeEl) {
+              time =
+                timeEl.getAttribute("aria-label") ||
+                timeEl.getAttribute("title") ||
+                (timeEl.textContent || "").trim();
+            }
+          }
+
+          // --- text ---
           const textNodes = Array.from(
             el.querySelectorAll('div[dir="auto"], span[dir="auto"]')
           ).filter(
@@ -327,12 +401,13 @@
             return null;
           }
 
-          return name ? `${name}: ${text}` : text;
+          return { author: author || null, time: time || null, text };
         })
-      ).filter(Boolean);
+        .filter(Boolean);
     }
 
-    // Fallback: generic leaf dir="auto" nodes outside the post body.
+    // Fallback: generic leaf dir="auto" nodes outside the post body, returned
+    // as plain { text } objects (no author/time available in this path).
     return uniqueNonEmptyTexts(
       Array.from(
         article.querySelectorAll('div[dir="auto"], span[dir="auto"]')
@@ -345,7 +420,9 @@
             !node.closest('[data-ad-comet-preview="message"]')
         )
         .map((node) => node.innerText || node.textContent || "")
-    ).filter((text) => !isUiChrome(text));
+    )
+      .filter((text) => !isUiChrome(text))
+      .map((text) => ({ author: null, time: null, text }));
   };
 
   // Return true for single-word platform strings that are never real post text.
@@ -416,8 +493,8 @@
         postText = pickBestTextCandidate(getPostBodyLeafTexts(article)) || null;
       }
 
-      visibleComments = extractComments(article).filter((text) => {
-        const n = normalizeText(text);
+      visibleComments = extractComments(article).filter((c) => {
+        const n = normalizeText(c.text);
         return n !== normalizeText(postText || "") && n.length > 0;
       });
     } catch (error) {
@@ -573,9 +650,10 @@
     articles.forEach((article) => {
       let postUrl = null;
       let authorName = null;
+      let postTimestamp = null;
       let postText = null;
-      let metricsRaw = null;
-      let visibleComments = [];
+      let metrics = null;
+      let comments = [];
 
       try {
         postUrl = extractPostUrl(article);
@@ -590,21 +668,27 @@
       }
 
       try {
+        postTimestamp = extractPostTimestamp(article);
+      } catch (error) {
+        console.debug("fb-group-scraper: timestamp extraction wrapper failed", error);
+      }
+
+      try {
         const textData = extractPostTextAndComments(article);
         postText = textData.postText;
-        visibleComments = textData.visibleComments;
+        comments = textData.visibleComments;
       } catch (error) {
         console.debug("fb-group-scraper: text extraction wrapper failed", error);
       }
 
       try {
-        metricsRaw = extractMetricsRaw(article);
+        metrics = extractMetricsRaw(article);
       } catch (error) {
         console.debug("fb-group-scraper: metrics extraction wrapper failed", error);
       }
 
       const uniqueKey =
-        postUrl || buildFallbackKey(postUrl, postText, metricsRaw, visibleComments);
+        postUrl || buildFallbackKey(postUrl, postText, metrics, comments.map((c) => c.text));
 
       // Skip items that are completely empty or already seen during previous
       // loop passes.
@@ -617,9 +701,10 @@
         id: state.nextPostId++,
         url: postUrl,
         author: authorName,
+        posted_at: postTimestamp,
         post_text: postText,
-        metrics_raw: metricsRaw,
-        visible_comments: visibleComments
+        metrics,
+        comments
       });
     });
   };
@@ -680,10 +765,18 @@
 
     const finalPosts = [...state.posts];
 
+    const meta = {
+      generated_at: new Date().toISOString(),
+      page_url: window.location.href,
+      page_title: document.title || null,
+      post_count: finalPosts.length,
+      scraper_version: "1.0.0"
+    };
+
     updateButton("Start Scraping", false);
     setStatus(`Finished\nExported ${finalPosts.length} unique posts`);
 
-    triggerDownload(finalPosts);
+    triggerDownload(finalPosts, meta);
     resetRunState();
   };
 
