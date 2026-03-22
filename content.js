@@ -266,19 +266,19 @@
   // (showing "10h", "March 5", etc.) near the author in the post header.
   const extractPostTimestamp = (article) => {
     try {
-      // Prefer <abbr title="full date"> which Facebook sometimes uses.
-      const abbr = article.querySelector(
-        ':not([role="article"]) abbr[title]'
-      );
-      if (abbr) {
-        return abbr.getAttribute("title") || abbr.textContent?.trim() || null;
-      }
-
-      // Fallback: find a <a> or <span> near the author header that has timestamp text.
-      // Exclude anything inside a nested comment article.
+      // Facebook uses <abbr aria-label="a week ago"><span>1w</span></abbr>
+      // for post timestamps. Exclude abbr elements inside comment sub-articles.
       const commentArticles = Array.from(
         article.querySelectorAll('[role="article"]')
       );
+      const abbr = Array.from(article.querySelectorAll("abbr[aria-label]")).find(
+        (el) => !commentArticles.some((c) => c.contains(el))
+      );
+      if (abbr) {
+        return abbr.getAttribute("aria-label") || abbr.textContent?.trim() || null;
+      }
+
+      // Fallback: find a <a> or <span> near the author header that has timestamp text.
       const isInComment = (el) => commentArticles.some((c) => c.contains(el));
 
       const candidates = Array.from(
