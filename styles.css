@@ -1,0 +1,50 @@
+#fbgs-root {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483647;
+  font-family: Arial, sans-serif;
+}
+
+#fbgs-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+  padding: 14px;
+  border: 2px solid #111827;
+  border-radius: 14px;
+  background: rgba(17, 24, 39, 0.96);
+  color: #ffffff;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+#fbgs-button {
+  appearance: none;
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #f97316, #ef4444);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+
+#fbgs-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+#fbgs-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+#fbgs-status {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #e5e7eb;
+  white-space: pre-line;
+}

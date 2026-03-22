@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "fb-group-scraper",
+  "version": "1.0.0",
+  "description": "Scrapes loaded Facebook Group posts with a human-like scroll loop and exports the results as JSON.",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.facebook.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.facebook.com/groups/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
